@@ -55,6 +55,7 @@ _COMMANDS = [
     BotCommand("add", "Neue Ausgabe eintragen"),
     BotCommand("repay", "Rückzahlung eintragen"),
     BotCommand("saldo", "Wer schuldet wem wie viel"),
+    BotCommand("stats", "Statistiken: wer hat wie viel gezahlt"),
     BotCommand("recent", "Alle Einträge anzeigen"),
     BotCommand("edit", "Alten Eintrag bearbeiten"),
     BotCommand("delete", "Eintrag löschen"),
@@ -83,6 +84,7 @@ def _help_text(is_admin: bool) -> str:
         "/add - neue Ausgabe eintragen (wer hat gezahlt, wie viel, wofür -- wird automatisch 50/50 aufgeteilt)",
         "/repay - Rückzahlung eintragen (wer zahlt wie viel an die andere Person zurück)",
         "/saldo - aktueller Stand: wer schuldet wem wie viel",
+        "/stats - Statistiken: wer hat wie viel gezahlt, größte Ausgabe, Durchschnitt, ...",
         "/recent - alle Einträge anzeigen",
         "/edit - einen bestehenden Eintrag bearbeiten (Liste mit Nummern, Nummer senden)",
         "/delete - einen bestehenden Eintrag löschen (Liste mit Nummern, Nummer senden)",
@@ -587,6 +589,43 @@ async def _cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("\n".join(lines))
 
 
+async def _cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_authorized(update):
+        return
+    try:
+        summary = get_summary(config.LEDGER_PATH)
+    except Exception:
+        logger.exception("Konnte Statistik nicht berechnen")
+        await update.message.reply_text("⚠️ Fehler beim Lesen der Excel-Datei.")
+        return
+
+    if summary["count"] == 0:
+        await update.message.reply_text("📭 Noch keine Einträge vorhanden.")
+        return
+
+    lines = ["📊 Statistik", "", "Pro Person:"]
+    for person in PERSONEN:
+        ausgaben_anzahl = summary["by_person_ausgaben_anzahl"][person]
+        ausgaben_summe = summary["by_person_ausgaben_summe"][person]
+        rueckzahlungen_anzahl = summary["by_person_rueckzahlungen_anzahl"][person]
+        rueckzahlungen_summe = summary["by_person_rueckzahlungen_summe"][person]
+        lines.append(
+            f"  {person}: {ausgaben_anzahl} Ausgabe(n) über {_format_amount(ausgaben_summe)}"
+            f", {rueckzahlungen_anzahl} Rückzahlung(en) über {_format_amount(rueckzahlungen_summe)}"
+        )
+
+    lines += [
+        "",
+        f"Ø Ausgabe: {_format_amount(summary['avg_ausgabe'])}",
+    ]
+    groesste = summary["groesste_ausgabe"]
+    if groesste is not None:
+        lines.append(f"Größte Ausgabe: {_format_amount(groesste.betrag)} ({groesste.von} — „{groesste.beschreibung}“)")
+    lines += ["", f"⚖️ {format_saldo(summary['balance'])}"]
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def _cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         return
@@ -931,6 +970,7 @@ def build_bot_application() -> Application:
     application.add_handler(CommandHandler("help", _cmd_start))
     application.add_handler(conversation_handler)
     application.add_handler(CommandHandler("saldo", _cmd_saldo))
+    application.add_handler(CommandHandler("stats", _cmd_stats))
     application.add_handler(CommandHandler("recent", _cmd_recent))
     application.add_handler(CommandHandler("undo", _cmd_undo))
     application.add_handler(CommandHandler("export", _cmd_export))

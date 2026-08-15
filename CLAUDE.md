@@ -25,6 +25,10 @@ Rückzahlungs-Funktion. Läuft als eigener systemd-Dienst parallel zu `urlaubstr
 - **Backup**: täglicher automatischer Telegram-Versand (Ledger-Excel + DB) an eine feste
   `config.BACKUP_CHAT_ID`, zusätzlich ein schlankeres Backup (nur die Excel-Datei) nach jeder
   einzelnen Änderung -- unabhängig vom Superuser. Zusätzlich manuell per `/backup`.
+- **Statistiken**: `_compute_stats()` in `expenses/ledger_store.py` ist die EINZIGE Stelle, die
+  Pro-Person-Zahlen (Anzahl/Summe Ausgaben & Rückzahlungen, Durchschnitt, größte Ausgabe, Saldo)
+  berechnet -- sowohl `/stats` im Bot als auch das Excel-Übersichtsblatt lesen von dort, damit
+  beide nie auseinanderlaufen.
 
 ## Wichtige Konventionen
 
