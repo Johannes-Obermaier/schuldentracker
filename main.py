@@ -22,6 +22,11 @@ async def main() -> None:
 
     application = build_bot_application()
     await application.initialize()
+    # Application.initialize() ruft post_init() NICHT auf (das macht laut PTB-Doku nur
+    # run_polling()/run_webhook()) -- ohne diesen expliziten Aufruf wuerde set_my_commands()
+    # bei jedem Neustart uebersprungen und das Telegram-Befehlsmenü liefe auf Dauer auseinander.
+    if application.post_init is not None:
+        await application.post_init(application)
     await application.start()
     await application.updater.start_polling()
     try:
