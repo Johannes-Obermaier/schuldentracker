@@ -14,6 +14,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 PERSONEN = ["Johannes", "Anna"]
 
 TYP_AUSGABE = "Ausgabe"
+TYP_GELIEHEN = "Geliehen"
 TYP_RUECKZAHLUNG = "Rückzahlung"
 
 _HEADER = ["Datum", "Typ", "Von", "An", "Betrag (EUR)", "Beschreibung"]
@@ -178,10 +179,15 @@ def remove_last_entry(path: str) -> Entry | None:
 
 def get_balance(entries: list[Entry]) -> dict[str, float]:
     """Netto-Saldo pro Person: positiv = wird von der jeweils anderen Person diesen Betrag
-    geschuldet. Bei einer Ausgabe wird der Betrag automatisch 50/50 zwischen den beiden
-    Personen aufgeteilt (der Zahler hat die Haelfte des Partners vorgestreckt), bei einer
-    Rückzahlung wird der volle Betrag vom Schuldner-Saldo abgezogen. Die Summe beider Salden
-    ist dadurch immer 0."""
+    geschuldet. Bei einer Ausgabe (TYP_AUSGABE) wird der Betrag automatisch 50/50 zwischen den
+    beiden Personen aufgeteilt (der Zahler hat die Haelfte des Partners vorgestreckt) -- eine
+    gemeinsame Ausgabe ist bewusst KEINE Schuld in voller Hoehe. Bei Geliehen (TYP_GELIEHEN,
+    "von" leiht "an" Geld, muss zu 100% zurückgezahlt werden) und einer Rückzahlung
+    (TYP_RUECKZAHLUNG, "von" zahlt "an" Geld zurück) wird dagegen der VOLLE Betrag verrechnet,
+    ohne Split -- beides sind einseitige Geldtransfers, kein gemeinsam getragener Posten.
+    Mathematisch ist die Wirkung auf den Saldo fuer beide identisch (balance[von] += Betrag,
+    balance[an] -= Betrag); der Typ dient hier nur der lesbaren Unterscheidung im Ledger
+    ("geliehen" vs. "zurückgezahlt"). Die Summe beider Salden ist in jedem Fall immer 0."""
     balance = {p: 0.0 for p in PERSONEN}
     for e in entries:
         if e.typ == TYP_AUSGABE:
@@ -215,6 +221,7 @@ def _compute_stats(entries: list[Entry]) -> dict:
     Übersichtsblatt (_rebuild_overview_sheet) genutzt, damit beide immer dieselben Zahlen
     zeigen und die Logik nur an einer Stelle gepflegt werden muss."""
     ausgaben = [e for e in entries if e.typ == TYP_AUSGABE]
+    geliehen = [e for e in entries if e.typ == TYP_GELIEHEN]
     rueckzahlungen = [e for e in entries if e.typ == TYP_RUECKZAHLUNG]
 
     by_person_ausgaben_summe = {p: 0.0 for p in PERSONEN}
@@ -223,6 +230,12 @@ def _compute_stats(entries: list[Entry]) -> dict:
         by_person_ausgaben_summe[e.von] += e.betrag
         by_person_ausgaben_anzahl[e.von] += 1
 
+    by_person_geliehen_summe = {p: 0.0 for p in PERSONEN}
+    by_person_geliehen_anzahl = {p: 0 for p in PERSONEN}
+    for e in geliehen:
+        by_person_geliehen_summe[e.von] += e.betrag
+        by_person_geliehen_anzahl[e.von] += 1
+
     by_person_rueckzahlungen_summe = {p: 0.0 for p in PERSONEN}
     by_person_rueckzahlungen_anzahl = {p: 0 for p in PERSONEN}
     for e in rueckzahlungen:
@@ -230,18 +243,23 @@ def _compute_stats(entries: list[Entry]) -> dict:
         by_person_rueckzahlungen_anzahl[e.von] += 1
 
     total_ausgaben = sum(e.betrag for e in ausgaben)
+    total_geliehen = sum(e.betrag for e in geliehen)
     total_rueckzahlungen = sum(e.betrag for e in rueckzahlungen)
     groesste_ausgabe = max(ausgaben, key=lambda e: e.betrag, default=None)
 
     return {
         "count": len(entries),
         "count_ausgaben": len(ausgaben),
+        "count_geliehen": len(geliehen),
         "count_rueckzahlungen": len(rueckzahlungen),
         "total_ausgaben": total_ausgaben,
+        "total_geliehen": total_geliehen,
         "total_rueckzahlungen": total_rueckzahlungen,
         "avg_ausgabe": total_ausgaben / len(ausgaben) if ausgaben else 0.0,
         "by_person_ausgaben_summe": by_person_ausgaben_summe,
         "by_person_ausgaben_anzahl": by_person_ausgaben_anzahl,
+        "by_person_geliehen_summe": by_person_geliehen_summe,
+        "by_person_geliehen_anzahl": by_person_geliehen_anzahl,
         "by_person_rueckzahlungen_summe": by_person_rueckzahlungen_summe,
         "by_person_rueckzahlungen_anzahl": by_person_rueckzahlungen_anzahl,
         "groesste_ausgabe": groesste_ausgabe,
@@ -276,62 +294,72 @@ def _rebuild_overview_sheet(workbook: Workbook, entries: list[Entry]) -> None:
 
     stats = _compute_stats(entries)
 
-    sheet["A3"] = "Gesamt Ausgaben:"
+    sheet["A3"] = "Gesamt Ausgaben (geteilt):"
     sheet["A3"].font = bold
     sheet["B3"] = stats["total_ausgaben"]
     sheet["B3"].number_format = _EUR_FORMAT
 
-    sheet["A4"] = "Gesamt Rückzahlungen:"
+    sheet["A4"] = "Gesamt Geliehen (100%):"
     sheet["A4"].font = bold
-    sheet["B4"] = stats["total_rueckzahlungen"]
+    sheet["B4"] = stats["total_geliehen"]
     sheet["B4"].number_format = _EUR_FORMAT
 
-    sheet["A5"] = "Anzahl Einträge:"
+    sheet["A5"] = "Gesamt Rückzahlungen:"
     sheet["A5"].font = bold
-    sheet["B5"] = stats["count"]
+    sheet["B5"] = stats["total_rueckzahlungen"]
+    sheet["B5"].number_format = _EUR_FORMAT
 
-    sheet["A6"] = "Ø Ausgabe:"
+    sheet["A6"] = "Anzahl Einträge:"
     sheet["A6"].font = bold
-    sheet["B6"] = stats["avg_ausgabe"]
-    sheet["B6"].number_format = _EUR_FORMAT
+    sheet["B6"] = stats["count"]
+
+    sheet["A7"] = "Ø Ausgabe (geteilt):"
+    sheet["A7"].font = bold
+    sheet["B7"] = stats["avg_ausgabe"]
+    sheet["B7"].number_format = _EUR_FORMAT
 
     groesste = stats["groesste_ausgabe"]
-    sheet["A7"] = "Größte Ausgabe:"
-    sheet["A7"].font = bold
+    sheet["A8"] = "Größte Ausgabe (geteilt):"
+    sheet["A8"].font = bold
     if groesste is not None:
-        sheet["B7"] = groesste.betrag
-        sheet["B7"].number_format = _EUR_FORMAT
-        sheet["C7"] = f"{groesste.von} — „{groesste.beschreibung}“"
+        sheet["B8"] = groesste.betrag
+        sheet["B8"].number_format = _EUR_FORMAT
+        sheet["C8"] = f"{groesste.von} — „{groesste.beschreibung}“"
 
     # Aktueller Saldo
-    sheet["A9"] = "Aktueller Saldo"
-    sheet["A9"].font = bold
-    sheet["A10"] = format_saldo(stats["balance"])
-    sheet.merge_cells(start_row=10, start_column=1, end_row=10, end_column=3)
-    sheet["A10"].alignment = sheet["A10"].alignment.copy(wrap_text=True)
+    sheet["A10"] = "Aktueller Saldo"
+    sheet["A10"].font = bold
+    sheet["A11"] = format_saldo(stats["balance"])
+    sheet.merge_cells(start_row=11, start_column=1, end_row=11, end_column=3)
+    sheet["A11"].alignment = sheet["A11"].alignment.copy(wrap_text=True)
 
-    # Pro Person -- Ausgaben (Anzahl + Summe) und Rückzahlungen (Anzahl + Summe)
-    sheet["A12"] = "Pro Person"
-    sheet["A12"].font = bold
-    sheet["A13"] = "Person"
-    sheet["B13"] = "Ausgaben (Anzahl)"
-    sheet["C13"] = "Ausgaben (Summe)"
-    sheet["D13"] = "Rückzahlungen (Anzahl)"
-    sheet["E13"] = "Rückzahlungen (Summe)"
-    for cell_ref in ("A13", "B13", "C13", "D13", "E13"):
+    # Pro Person -- Ausgaben (geteilt), Geliehen (100%) und Rückzahlungen, je Anzahl + Summe
+    sheet["A13"] = "Pro Person"
+    sheet["A13"].font = bold
+    sheet["A14"] = "Person"
+    sheet["B14"] = "Ausgaben (Anzahl)"
+    sheet["C14"] = "Ausgaben (Summe)"
+    sheet["D14"] = "Geliehen (Anzahl)"
+    sheet["E14"] = "Geliehen (Summe)"
+    sheet["F14"] = "Rückzahlungen (Anzahl)"
+    sheet["G14"] = "Rückzahlungen (Summe)"
+    for cell_ref in ("A14", "B14", "C14", "D14", "E14", "F14", "G14"):
         sheet[cell_ref].font = bold
-    sheet.column_dimensions["D"].width = 20
-    sheet.column_dimensions["E"].width = 20
-    row = 14
+    for col in ("D", "E", "F", "G"):
+        sheet.column_dimensions[col].width = 18
+    row = 15
     person_start_row = row
     for person in PERSONEN:
         sheet.cell(row=row, column=1, value=person)
         sheet.cell(row=row, column=2, value=stats["by_person_ausgaben_anzahl"][person])
         cell_c = sheet.cell(row=row, column=3, value=stats["by_person_ausgaben_summe"][person])
         cell_c.number_format = _EUR_FORMAT
-        sheet.cell(row=row, column=4, value=stats["by_person_rueckzahlungen_anzahl"][person])
-        cell_e = sheet.cell(row=row, column=5, value=stats["by_person_rueckzahlungen_summe"][person])
+        sheet.cell(row=row, column=4, value=stats["by_person_geliehen_anzahl"][person])
+        cell_e = sheet.cell(row=row, column=5, value=stats["by_person_geliehen_summe"][person])
         cell_e.number_format = _EUR_FORMAT
+        sheet.cell(row=row, column=6, value=stats["by_person_rueckzahlungen_anzahl"][person])
+        cell_g = sheet.cell(row=row, column=7, value=stats["by_person_rueckzahlungen_summe"][person])
+        cell_g.number_format = _EUR_FORMAT
         row += 1
     person_end_row = row - 1
 
@@ -346,6 +374,6 @@ def _rebuild_overview_sheet(workbook: Workbook, entries: list[Entry]) -> None:
     bar.set_categories(bar_labels)
     bar.height = 9
     bar.width = 14
-    sheet.add_chart(bar, "G2")
+    sheet.add_chart(bar, "A19")
 
     workbook.active = workbook.sheetnames.index(_OVERVIEW_SHEET_NAME)

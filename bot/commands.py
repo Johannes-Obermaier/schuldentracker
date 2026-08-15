@@ -31,6 +31,7 @@ from expenses.ledger_store import (
     Entry,
     PERSONEN,
     TYP_AUSGABE,
+    TYP_GELIEHEN,
     TYP_RUECKZAHLUNG,
     add_entry,
     delete_entry_at,
@@ -47,12 +48,12 @@ from expenses.ledger_store import (
 
 logger = logging.getLogger(__name__)
 
-WER, BETRAG, BESCHREIBUNG = range(3)
-EDIT_SELECT, DELETE_SELECT, DELETE_CONFIRM = range(3, 6)
+ART, WER, BETRAG, BESCHREIBUNG = range(4)
+EDIT_SELECT, DELETE_SELECT, DELETE_CONFIRM = range(4, 7)
 CONVERSATION_TIMEOUT_SECONDS = 300
 
 _COMMANDS = [
-    BotCommand("add", "Neue Ausgabe eintragen"),
+    BotCommand("add", "Ausgabe (50/50) oder Geliehen (100%) eintragen"),
     BotCommand("repay", "Rückzahlung eintragen"),
     BotCommand("saldo", "Wer schuldet wem wie viel"),
     BotCommand("stats", "Statistiken: wer hat wie viel gezahlt"),
@@ -81,7 +82,8 @@ def _help_text(is_admin: bool) -> str:
     lines = [
         "💸 Schulden-Tracker",
         "",
-        "/add - neue Ausgabe eintragen (wer hat gezahlt, wie viel, wofür -- wird automatisch 50/50 aufgeteilt)",
+        "/add - neuen Eintrag erfassen: entweder eine gemeinsame Ausgabe (50/50 geteilt) oder "
+        "Geliehen (eine Person leiht der anderen Geld, muss zu 100% zurückgezahlt werden)",
         "/repay - Rückzahlung eintragen (wer zahlt wie viel an die andere Person zurück)",
         "/saldo - aktueller Stand: wer schuldet wem wie viel",
         "/stats - Statistiken: wer hat wie viel gezahlt, größte Ausgabe, Durchschnitt, ...",
@@ -188,7 +190,9 @@ def _describe_action(typ: str, von: str, betrag: float, beschreibung: str, an: s
     Speichern/Bearbeiten, wo kein Entry mit bereits zugewiesenem Datum vorliegt."""
     betrag_text = _format_amount(betrag)
     if typ == TYP_AUSGABE:
-        return f"🧾 {von} zahlte {betrag_text} für „{beschreibung}“"
+        return f"🧾 {von} zahlte {betrag_text} für „{beschreibung}“ (geteilt)"
+    if typ == TYP_GELIEHEN:
+        return f"🏦 {von} lieh {an} {betrag_text} für „{beschreibung}“ (100%, muss zurückgezahlt werden)"
     return f"💶 {von} zahlte {betrag_text} an {an} zurück"
 
 
@@ -196,7 +200,9 @@ def _entry_line(e: Entry) -> str:
     tag = datetime.fromisoformat(e.datum).strftime("%d.%m.%Y")
     betrag_text = _format_amount(e.betrag)
     if e.typ == TYP_AUSGABE:
-        return f"{tag} 🧾 {e.von} zahlte {betrag_text} für „{e.beschreibung}“"
+        return f"{tag} 🧾 {e.von} zahlte {betrag_text} für „{e.beschreibung}“ (geteilt)"
+    if e.typ == TYP_GELIEHEN:
+        return f"{tag} 🏦 {e.von} lieh {e.an} {betrag_text} für „{e.beschreibung}“ (100%)"
     return f"{tag} 💶 {e.von} zahlte {betrag_text} an {e.an} zurück"
 
 
@@ -215,6 +221,13 @@ def _numbered_entry_lines(indexed: list[tuple[int, Entry]]) -> tuple[str, list[i
 
 def _wer_buttons(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(p, callback_data=f"{prefix}:{p}") for p in PERSONEN]])
+
+
+def _art_buttons() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🧾 Gemeinsame Ausgabe (50/50)", callback_data=f"art:{TYP_AUSGABE}"),
+        InlineKeyboardButton("🏦 Geliehen (100%)", callback_data=f"art:{TYP_GELIEHEN}"),
+    ]])
 
 
 def _new_user_info_text(update: Update) -> str:
@@ -429,8 +442,24 @@ async def _cb_deauthorize(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def _cmd_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     if not _is_authorized(update):
         return ConversationHandler.END
-    context.user_data["typ"] = TYP_AUSGABE
-    await update.message.reply_text("Wer hat gezahlt?", reply_markup=_wer_buttons("wer"))
+    await update.message.reply_text(
+        "Was für ein Eintrag?\n\n"
+        "🧾 Gemeinsame Ausgabe -- wird automatisch 50/50 zwischen euch beiden aufgeteilt.\n"
+        "🏦 Geliehen -- eine Person leiht der anderen Geld, das zu 100% zurückgezahlt werden muss "
+        "(keine Aufteilung).",
+        reply_markup=_art_buttons(),
+    )
+    return ART
+
+
+async def _cb_art(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    typ = query.data.split(":", 1)[1]
+    context.user_data["typ"] = typ
+    frage = "Wer hat gezahlt?" if typ == TYP_AUSGABE else "Wer leiht Geld?"
+    await query.edit_message_text(f"Art: {typ}")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=frage, reply_markup=_wer_buttons("wer"))
     return WER
 
 
@@ -448,13 +477,19 @@ async def _cb_wer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     von = query.data.split(":", 1)[1]
     context.user_data["von"] = von
     typ = context.user_data.get("typ")
+    other = [p for p in PERSONEN if p != von][0]
 
     if typ == TYP_RUECKZAHLUNG:
-        other = [p for p in PERSONEN if p != von][0]
         await query.edit_message_text(f"Wer zahlt zurück? {von}")
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"Wie viel zahlt {von} an {other} zurück? (z.B. 25,50)",
+        )
+    elif typ == TYP_GELIEHEN:
+        await query.edit_message_text(f"Wer leiht Geld? {von}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Wie viel leiht {von} an {other}? (z.B. 25,50 -- muss zu 100% zurückgezahlt werden)",
         )
     else:
         await query.edit_message_text(f"Wer hat gezahlt? {von}")
@@ -475,7 +510,8 @@ async def _handle_betrag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if context.user_data.get("typ") == TYP_RUECKZAHLUNG:
         return await _finalize_entry(update, context, beschreibung="")
 
-    await update.message.reply_text(f"Betrag: {_format_amount(amount)}\n\nWofür? (kurze Beschreibung)")
+    frage = "Wofür?" if context.user_data.get("typ") == TYP_AUSGABE else "Wofür wird das Geld geliehen?"
+    await update.message.reply_text(f"Betrag: {_format_amount(amount)}\n\n{frage} (kurze Beschreibung)")
     return BESCHREIBUNG
 
 
@@ -493,7 +529,7 @@ async def _finalize_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, *,
     betrag = context.user_data.pop("betrag")
     edit_row = context.user_data.pop("edit_row", None)
     an = None
-    if typ == TYP_RUECKZAHLUNG:
+    if typ in (TYP_RUECKZAHLUNG, TYP_GELIEHEN):
         an = [p for p in PERSONEN if p != von][0]
 
     if edit_row is not None:
@@ -607,16 +643,19 @@ async def _cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for person in PERSONEN:
         ausgaben_anzahl = summary["by_person_ausgaben_anzahl"][person]
         ausgaben_summe = summary["by_person_ausgaben_summe"][person]
+        geliehen_anzahl = summary["by_person_geliehen_anzahl"][person]
+        geliehen_summe = summary["by_person_geliehen_summe"][person]
         rueckzahlungen_anzahl = summary["by_person_rueckzahlungen_anzahl"][person]
         rueckzahlungen_summe = summary["by_person_rueckzahlungen_summe"][person]
         lines.append(
-            f"  {person}: {ausgaben_anzahl} Ausgabe(n) über {_format_amount(ausgaben_summe)}"
+            f"  {person}: {ausgaben_anzahl} Ausgabe(n) über {_format_amount(ausgaben_summe)} (geteilt)"
+            f", {geliehen_anzahl}x Geld geliehen über {_format_amount(geliehen_summe)}"
             f", {rueckzahlungen_anzahl} Rückzahlung(en) über {_format_amount(rueckzahlungen_summe)}"
         )
 
     lines += [
         "",
-        f"Ø Ausgabe: {_format_amount(summary['avg_ausgabe'])}",
+        f"Ø Ausgabe (geteilt): {_format_amount(summary['avg_ausgabe'])}",
     ]
     groesste = summary["groesste_ausgabe"]
     if groesste is not None:
@@ -726,7 +765,12 @@ async def _handle_edit_select(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["edit_row"] = row_number
     context.user_data["typ"] = entry.typ
 
-    frage = "Wer zahlt zurück?" if entry.typ == TYP_RUECKZAHLUNG else "Wer hat gezahlt?"
+    if entry.typ == TYP_RUECKZAHLUNG:
+        frage = "Wer zahlt zurück?"
+    elif entry.typ == TYP_GELIEHEN:
+        frage = "Wer leiht Geld?"
+    else:
+        frage = "Wer hat gezahlt?"
     await update.message.reply_text(
         f"✏️ Bisheriger Wert: {_entry_line(entry)}\n\n{frage}", reply_markup=_wer_buttons("wer")
     )
@@ -951,6 +995,7 @@ def build_bot_application() -> Application:
             CommandHandler("delete", _cmd_delete_start),
         ],
         states={
+            ART: [CallbackQueryHandler(_cb_art, pattern=r"^art:")],
             WER: [CallbackQueryHandler(_cb_wer, pattern=r"^wer:")],
             BETRAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_betrag)],
             BESCHREIBUNG: [MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_beschreibung)],

@@ -12,11 +12,18 @@ Rückzahlungs-Funktion. Läuft als eigener systemd-Dienst parallel zu `urlaubstr
   durchgehenden Ledger -- kein Trip/Konten-Konzept wie beim Urlaubstracker. Ledger-Blatt
   ("Ledger") + ein bei jeder Änderung komplett neu gebautes Übersichts-Blatt ("Übersicht") mit
   Balkendiagramm und aktuellem Saldo.
-- **Zwei Eintragsarten in einer Tabelle** (Spalte "Typ"): `Ausgabe` (wird automatisch 50/50
-  zwischen den beiden Personen aufgeteilt) und `Rückzahlung` (voller Betrag reduziert direkt die
-  Schuld). Saldo-Berechnung (`get_balance` in `expenses/ledger_store.py`) verrechnet beide
-  Eintragsarten zu einem einzigen Netto-Saldo pro Person; die Summe beider Salden ist dabei
-  immer 0 (siehe Kommentar dort für die genaue Herleitung).
+- **Drei Eintragsarten in einer Tabelle** (Spalte "Typ"): `Ausgabe` (wird automatisch 50/50
+  zwischen den beiden Personen aufgeteilt -- eine gemeinsam getragene Ausgabe), `Geliehen`
+  (eine Person leiht der anderen den vollen Betrag, MUSS zu 100% zurückgezahlt werden, keine
+  Aufteilung -- bewusst NICHT "Darlehen" genannt, siehe Commit-Historie) und `Rückzahlung`
+  (voller Betrag reduziert direkt die Schuld). `/add` fragt zuerst per Button, ob es sich um
+  eine Ausgabe oder Geliehen handelt (State `ART` in `bot/commands.py`), bevor nach Person/
+  Betrag/Beschreibung gefragt wird; `/repay` ist ein eigener, separater Befehl für
+  Rückzahlungen. Saldo-Berechnung (`get_balance` in `expenses/ledger_store.py`) verrechnet alle
+  drei Eintragsarten zu einem einzigen Netto-Saldo pro Person -- mathematisch sind `Geliehen`
+  und `Rückzahlung` identisch (voller Betrag, kein Split), nur die Beschriftung im Ledger
+  unterscheidet sich; die Summe beider Salden ist dabei immer 0 (siehe Kommentar dort für die
+  genaue Herleitung).
 - **DB**: SQLite (`data/schuldentracker.db`) NUR für die Autorisierung (`authorized_users`) --
   kein Trip-/aktive-Auswahl-Konzept wie beim Urlaubstracker, da es nur einen einzigen Ledger
   gibt.
